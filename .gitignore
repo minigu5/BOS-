@@ -1,0 +1,31 @@
+# 대용량 데이터 / 학습 산출물
+input_videos/
+output_dataset/
+dataset/
+checkpoints/
+dist/
+
+# 가상환경
+.venv/
+venv/
+env/
+
+# Python 캐시
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 로그 / 런타임
+*.log
+*.pid
+
+# OS / 에디터
+.DS_Store
+.idea/
+.vscode/
+.claude/
+
+# 빌드 산출물
+build/
+*.egg-info/
