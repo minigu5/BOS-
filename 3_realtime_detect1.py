@@ -39,13 +39,13 @@ CHUNK_SIZE = 16            # AI 판단에 필요한 프레임 수
 CAMERA_INDEX = 0           # 노트북 내장 웹캠 (안 켜지면 1로 변경)
 
 # 경보 임계값 — 2_train.py "임계값 스윕" 표를 보고 조정.
-# 2026-05-20 학습 스윕 기준: 0.35 에서 Recall 1.00, Precision 0.42 → 미탐 최소화.
-# 산발적 오탐은 아래 시간적 히스테리시스가 잡아낸다.
-THRESHOLD = 0.35
+# 2026-05-24 학습(241영상) 스윕 기준: 0.50 에서 Precision 0.97 / Recall 0.84 / F1 0.90 (오탐 최소).
+# 실제 가스 누출은 지속적이라 per-chunk Recall 0.84여도 시간 누적으로 거의 다 탐지된다.
+THRESHOLD = 0.50
 # 시간적 히스테리시스: 최근 ALARM_WINDOW 회 중 ALARM_MIN_HITS 회 이상
 #                     임계 초과 시에만 경보 (한두 프레임 깜빡임은 무시).
 ALARM_WINDOW = 6
-ALARM_MIN_HITS = 5
+ALARM_MIN_HITS = 4
 
 
 def main():

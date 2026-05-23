@@ -7,9 +7,12 @@ BOS 데이터 전처리 프로그램
   - 신호 처리(흐름 계산·FP 억제·정규화·EMA 배경)는 전부 bos_common 에서 가져온다.
     → 실시간 추론(3_realtime_detect1.py)과 100% 동일한 입력 분포를 보장.
 
-파일명 규칙:
-  *_G.mp4  →  Gas   (Label 1)
-  *_N.mp4  →  Normal(Label 0)
+라벨 지정 방법 (둘 중 아무거나, 혼용 가능):
+  방법1 (권장): 폴더로 구분 — 파일명 무관
+    input_videos/gas/    안의 모든 영상  →  Gas   (Label 1)
+    input_videos/normal/ 안의 모든 영상  →  Normal(Label 0)
+  방법2 (하위 호환): 파일명 끝 글자
+    *_G.mp4  →  Gas   /  *_N.mp4  →  Normal
 
 실행 예시:
   python 1_preprocess.py
@@ -53,7 +56,7 @@ DEFAULT_CONFIG = {
 
 
 def parse_label(filename: str) -> tuple:
-    """파일명 끝의 '_G'/'_N' → (label_int, class_name)."""
+    """파일명 끝의 '_G'/'_N' → (label_int, class_name). (파일명 기반, 하위 호환용)"""
     stem = Path(filename).stem
     upper = stem.upper()
     if upper.endswith("_G"):
@@ -66,14 +69,60 @@ def parse_label(filename: str) -> tuple:
     )
 
 
+def collect_videos(input_dir: Path, extensions: list) -> tuple:
+    """
+    영상 수집 — 두 방식 지원 (혼용 가능):
+      1. 폴더 기반(권장): input_videos/gas/* , input_videos/normal/*  → 파일명 무관
+      2. 파일명 기반(하위 호환): input_videos/*_G.* , *_N.*
+
+    폴더 간 파일명 충돌(예: gas/C0001 과 normal/C0001)을 막기 위해
+    output_stem 에 클래스명을 접두사로 붙인다 → "Gas_C0001", "Normal_C0001".
+
+    반환: (videos, skipped)
+        videos:  [(video_path, label, class_name, output_stem), ...]
+        skipped: 레이블 판별 실패한 파일명 리스트
+    """
+    input_dir = Path(input_dir)
+    found, skipped = [], []
+
+    def glob_videos(folder: Path) -> list:
+        vids = []
+        for ext in extensions:
+            vids.extend(folder.glob(f"*{ext}"))
+        return sorted(set(vids))
+
+    # 1) 폴더 기반 (대소문자·별칭 허용: gas/g, normal/n)
+    folder_label = {"gas": (1, "Gas"), "g": (1, "Gas"),
+                    "normal": (0, "Normal"), "n": (0, "Normal")}
+    for child in sorted(input_dir.iterdir()):
+        if child.is_dir() and child.name.lower() in folder_label:
+            label, class_name = folder_label[child.name.lower()]
+            for v in glob_videos(child):
+                found.append((v, label, class_name, f"{class_name}_{v.stem}"))
+
+    # 2) 파일명 기반 (input_videos 바로 아래의 _G/_N 파일)
+    for v in glob_videos(input_dir):
+        try:
+            label, class_name = parse_label(v.name)
+            found.append((v, label, class_name, v.stem))
+        except ValueError:
+            skipped.append(v.name)
+
+    return found, skipped
+
+
 def process_video(
     video_path: Path,
     output_class_dir: Path,
     chunk_size: int,
     overlap: int,
     sup_kwargs: dict,
+    output_stem: str = None,
+    save_size: int = 0,
 ) -> int:
-    """단일 동영상 → BOS 청크(.npy) 저장. 반환: 저장된 청크 수."""
+    """단일 동영상 → BOS 청크(.npy) 저장. 반환: 저장된 청크 수.
+    output_stem: 출력 파일명 접두사(없으면 원본 파일명 stem 사용).
+    save_size: 저장 해상도(px). 0이면 흐름 계산 해상도(RESIZE) 그대로. 예) 112."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         logger.error(f"동영상을 열 수 없습니다: {video_path}")
@@ -121,10 +170,17 @@ def process_video(
         )
         return 0
 
-    stem = video_path.stem
+    stem = output_stem if output_stem else video_path.stem
     chunk_count = 0
     for start in range(0, n_flows - chunk_size + 1, stride):
         chunk = np.array(flow_buffer[start : start + chunk_size], dtype=np.float32)
+        # 저장 해상도 축소 옵션 (디스크 절약). 모델 입력 크기(112)로 저장해도
+        # 학습 결과 동일 — 학습 Dataset 이 어차피 img_size 로 리사이즈하기 때문.
+        if save_size and chunk.shape[1] != save_size:
+            small = np.zeros((chunk.shape[0], save_size, save_size, 2), dtype=np.float32)
+            for t in range(chunk.shape[0]):
+                small[t] = cv2.resize(chunk[t], (save_size, save_size))
+            chunk = small
         np.save(output_class_dir / f"{stem}_chunk{chunk_count:04d}.npy", chunk)
         chunk_count += 1
 
@@ -158,6 +214,9 @@ def main():
                         help=f"응집 블롭 면적비 (기본 {bc.BLOB_AREA_FRAC}, 사람 경보 잦으면 ↓)")
     parser.add_argument("--no_gmc", action="store_true", help="전역 모션 상쇄 끄기")
     parser.add_argument("--no_coherence", action="store_true", help="응집 블롭 제거 끄기")
+    parser.add_argument("--save_size", type=int, default=0,
+                        help="저장 청크 해상도(px). 0=흐름 계산 해상도 그대로. "
+                             "112 로 주면 모델 입력 크기로 축소 저장(디스크 1/4, 결과 동일)")
     args = parser.parse_args()
 
     if args.overlap >= args.chunk_size:
@@ -183,19 +242,20 @@ def main():
     for class_name in ["Gas", "Normal"]:
         (output_dir / class_name).mkdir(parents=True, exist_ok=True)
 
-    video_files = []
-    for ext in DEFAULT_CONFIG["video_extensions"]:
-        video_files.extend(input_dir.glob(f"*{ext}"))
-    video_files = sorted(set(video_files))
+    videos, skipped = collect_videos(input_dir, DEFAULT_CONFIG["video_extensions"])
 
-    if not video_files:
+    if not videos:
         logger.error(
-            f"'{input_dir}' 폴더에서 동영상 파일을 찾을 수 없습니다. "
-            f"지원 형식: {DEFAULT_CONFIG['video_extensions']}"
+            f"'{input_dir}' 에서 동영상을 찾을 수 없습니다.\n"
+            f"  방법1(권장): {input_dir}/gas/ 와 {input_dir}/normal/ 폴더에 영상 넣기 (파일명 무관)\n"
+            f"  방법2: {input_dir}/ 에 *_G.mp4 / *_N.mp4 형식으로 넣기\n"
+            f"  지원 형식: {DEFAULT_CONFIG['video_extensions']}"
         )
         sys.exit(1)
 
-    logger.info(f"동영상 {len(video_files)}개 발견 — 전처리 시작")
+    n_gas_vid = sum(1 for _, lbl, _, _ in videos if lbl == 1)
+    n_nor_vid = sum(1 for _, lbl, _, _ in videos if lbl == 0)
+    logger.info(f"동영상 {len(videos)}개 발견 (Gas {n_gas_vid} / Normal {n_nor_vid}) — 전처리 시작")
     logger.info(
         f"설정: chunk_size={args.chunk_size}, overlap={args.overlap}, "
         f"stride={args.chunk_size - args.overlap}, resize={bc.RESIZE}, "
@@ -208,18 +268,11 @@ def main():
     )
 
     total_gas = total_normal = 0
-    skipped = []
-    for video_path in video_files:
-        try:
-            label, class_name = parse_label(video_path.name)
-        except ValueError as e:
-            logger.warning(str(e))
-            skipped.append(video_path.name)
-            continue
-
+    for video_path, label, class_name, output_stem in videos:
         n_chunks = process_video(
             video_path, output_dir / class_name,
             args.chunk_size, args.overlap, sup_kwargs,
+            output_stem=output_stem, save_size=args.save_size,
         )
         if label == 1:
             total_gas += n_chunks
