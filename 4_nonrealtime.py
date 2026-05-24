@@ -53,6 +53,7 @@ ALARM_WINDOW = det.ALARM_WINDOW
 ALARM_MIN_HITS = det.ALARM_MIN_HITS
 ALARM_REPEAT_SEC = det.ALARM_REPEAT_SEC
 MODEL_PATH = det.MODEL_PATH
+RES_PRESETS = det.RES_PRESETS      # [(1280,720),(1920,1080),(2560,1440),(3840,2160)]
 
 WINDOW = "BOS Detection (video)"
 
@@ -127,18 +128,31 @@ def main():
         print("[ERROR] 첫 프레임 읽기 실패.")
         return
 
+    def resize_to(frame, idx):
+        tw, th = RES_PRESETS[idx]
+        if (frame.shape[1], frame.shape[0]) == (tw, th):
+            return frame
+        return cv2.resize(frame, (tw, th))
+
+    # 기본 Res = 영상 원본 높이에 가장 가까운 프리셋 (기본은 사실상 원본 그대로)
+    res_idx = min(range(len(RES_PRESETS)), key=lambda i: abs(RES_PRESETS[i][1] - first.shape[0]))
+
     cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
+    print(f"[INFO] 영상 원본 {first.shape[1]}x{first.shape[0]} → 처리 해상도 {RES_PRESETS[res_idx]}")
     print("[INFO] 마우스로 BOS 영역을 드래그한 뒤 ENTER. 전체는 그냥 ENTER.")
-    roi = select_roi(first)
+    roi = select_roi(resize_to(first, res_idx))
     print(f"[INFO] ROI = {roi if roi else '전체 화면'}")
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)   # 처음부터 재생
 
+    # 3_ 와 동일한 5개 슬라이더 (Res 는 영상 프레임을 해당 해상도로 리사이즈해 처리)
+    cv2.createTrackbar("Res", WINDOW, res_idx, len(RES_PRESETS) - 1, lambda v: None)
     cv2.createTrackbar("Thr%", WINDOW, int(THRESHOLD * 100), 95, lambda v: None)
     cv2.createTrackbar("MinMove x1000", WINDOW, int(bc.DEADZONE_LO * 1000), 200, lambda v: None)
     cv2.createTrackbar("Ceil x100", WINDOW, int(bc.CEILING_HI * 100), 300, lambda v: None)
     cv2.createTrackbar("KeepGas", WINDOW, 0, 1, lambda v: None)
 
-    ema_bg = bc.to_gray_resized(crop(first, roi))
+    cur_res = res_idx
+    ema_bg = bc.to_gray_resized(crop(resize_to(first, res_idx), roi))
     flow_buffer = collections.deque(maxlen=CHUNK_SIZE)
     alarm_hist = collections.deque(maxlen=ALARM_WINDOW)
     last_alarm_play = 0.0
@@ -156,9 +170,18 @@ def main():
                 flow_buffer.clear(); alarm_hist.clear()
                 continue
 
-            region = crop(frame, roi)
+            # Res 변경 감지 → 적용 + ROI/배경 초기화
+            ridx = cv2.getTrackbarPos("Res", WINDOW)
+            if ridx != cur_res:
+                cur_res = ridx
+                roi = None; ema_bg = None
+                flow_buffer.clear(); alarm_hist.clear()
+                print(f"[INFO] 처리 해상도 → {RES_PRESETS[ridx]} (ROI 초기화, r 로 재설정)")
+
+            frame_proc = resize_to(frame, cur_res)
+            region = crop(frame_proc, roi)
             curr_gray = bc.to_gray_resized(region)
-            if ema_bg is None:              # 재시작/ROI변경 직후 배경 재초기화
+            if ema_bg is None:              # 재시작/ROI변경/Res변경 직후 배경 재초기화
                 ema_bg = curr_gray.copy()
                 continue
 
@@ -189,11 +212,10 @@ def main():
                     play_alarm()
                     last_alarm_play = now
 
-            h, w = frame.shape[:2]
             view = compose_view(region, flow_norm,
                                 prob if prob is not None else 0.0,
                                 alarm_hist, thr, alarm, buffering=(prob is None),
-                                cap_res=(w, h), supp=(min_move, ceil, keep_gas))
+                                cap_res=RES_PRESETS[cur_res], supp=(min_move, ceil, keep_gas))
             pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
             cv2.putText(view, f"PLAY  {pos}/{total}", (15, 22),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 255, 180), 2)
@@ -218,8 +240,8 @@ def main():
             flow_buffer.clear(); alarm_hist.clear()
             paused = False
             print("[INFO] 처음부터 다시 재생")
-        elif key == ord('r'):                 # ROI 재설정
-            roi = select_roi(frame)
+        elif key == ord('r'):                 # ROI 재설정 (현재 처리 해상도 기준)
+            roi = select_roi(resize_to(frame, cur_res))
             ema_bg = None
             flow_buffer.clear(); alarm_hist.clear()
             print(f"[INFO] ROI 재설정: {roi if roi else '전체 화면'}")
