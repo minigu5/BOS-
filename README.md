@@ -248,11 +248,21 @@ threshold 를 골라 Step 3에 반영합니다.
 웹캠 영상에 학습된 모델을 적용해 실시간으로 가스 누출을 탐지합니다.
 전처리와 **완전히 동일한 신호 경로**(`bos_common.process_pair`)를 사용합니다.
 
+> ✅ **학습된 모델(`checkpoints/best_model.pth`, ~41MB)이 저장소에 포함**돼 있습니다.
+> `git clone` 후 **Step 1·2(전처리·학습) 없이 바로 Step 3 실행 가능**합니다.
+> (대용량 영상·청크 데이터는 제외되어 있으니, 재학습하려면 직접 영상을 넣어 Step 1부터 진행하세요.)
+
 ### 실행
 
 ```bash
+git clone https://github.com/minigu5/BOS-.git
+cd BOS-
+pip install -r requirements.txt
 python 3_realtime_detect1.py
 ```
+
+> 다른 폴더에서 실행해도 되도록 모델/모듈 경로는 스크립트 위치 기준으로 해석됩니다.
+> 모델 파일이 없으면 친절한 안내 메시지가 출력됩니다.
 
 - 화면에 `AI Probability` 와 최근 경보 적중 횟수가 표시됩니다.
 - 경보 조건을 충족하면 `WARNING: GAS LEAK DETECTED!` 와 빨간 테두리가 뜹니다.

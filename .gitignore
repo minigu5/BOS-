@@ -2,7 +2,9 @@
 input_videos/
 output_dataset/
 dataset/
-checkpoints/
+checkpoints/*
+# 학습된 모델(~41MB)은 추적 — clone 만으로 추론 가능
+!checkpoints/best_model.pth
 dist/
 
 # 가상환경

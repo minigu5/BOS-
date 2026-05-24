@@ -23,6 +23,15 @@ import torch
 
 import bos_common as bc
 
+# 스크립트가 있는 폴더 기준으로 경로를 해석 (다른 디렉터리에서 실행해도 동작)
+import os
+import sys
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
 # 2_train.py 에서 3D CNN 모델 구조를 그대로 가져온다 (같은 폴더에 있어야 함).
 try:
     from importlib import import_module
@@ -33,7 +42,7 @@ except ImportError:
     raise SystemExit(1)
 
 # ─── 설정값 ──────────────────────────────────────────────────────────
-MODEL_PATH = "checkpoints/best_model.pth"
+MODEL_PATH = str(SCRIPT_DIR / "checkpoints" / "best_model.pth")
 IMG_SIZE = 112             # 모델 입력 해상도 (2_train.py 의 img_size 와 동일)
 CHUNK_SIZE = 16            # AI 판단에 필요한 프레임 수
 CAMERA_INDEX = 0           # 노트북 내장 웹캠 (안 켜지면 1로 변경)
@@ -57,13 +66,19 @@ def main():
     print(f"[INFO] AI 모델 로딩 중... (사용 장치: {device})")
 
     model = BOS3DCNN(in_channels=2, dropout=0.0).to(device)
+    if not os.path.exists(MODEL_PATH):
+        print(f"[ERROR] 모델 파일이 없습니다: {MODEL_PATH}")
+        print("        해결: git pull 로 최신본을 받거나(checkpoints/best_model.pth 포함),")
+        print("        직접 학습: python 1_preprocess.py 후 python 2_train.py")
+        return
     try:
-        ckpt = torch.load(MODEL_PATH, map_location=device)
+        # weights_only=False: 체크포인트에 args 등 비텐서 항목 포함 (최신 torch 대응)
+        ckpt = torch.load(MODEL_PATH, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"])
         model.eval()
-        print("[INFO] AI 모델 로드 성공! (best_model.pth)")
+        print(f"[INFO] AI 모델 로드 성공! ({os.path.basename(MODEL_PATH)})")
     except Exception as e:
-        print(f"[ERROR] 모델을 불러오지 못했습니다. 경로를 확인하세요: {e}")
+        print(f"[ERROR] 모델을 불러오지 못했습니다: {e}")
         return
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
