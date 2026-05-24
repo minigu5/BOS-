@@ -77,6 +77,8 @@ def suppress_false_positive(
     hi: float = CEILING_HI,
     coherence: bool = COHERENCE,
     blob_area_frac: float = BLOB_AREA_FRAC,
+    coherent_only: bool = False,
+    coherence_thresh: float = 0.5,
 ) -> np.ndarray:
     """
     오탐 억제 필터. **학습/추론 양쪽에서 동일하게 호출**되어야 한다.
@@ -85,6 +87,10 @@ def suppress_false_positive(
     - 카메라 흔들림   : 화면 전체가 같은 방향 (전역)        → (a)로 제거
     - 센서/조명 노이즈: 매우 작은 magnitude                 → (b)로 제거
     - 사람/차량/문    : 크고(고 magnitude) 한 덩어리로 응집  → (c)(d)로 제거
+
+    coherent_only=True (난류 인식): 큰 블롭이라도 '방향이 일관된(강체)' 것만 제거하고,
+      방향이 제각각인 '난류'(가스로 추정)는 유지한다. → 손은 지우되 큰 가스는 살림.
+      coherence_thresh: 블롭의 방향 일관성( |Σv| / Σ|v| , 1=강체·0=난류 ) 이 값 이상이면 제거.
     """
     flow = flow.copy()
 
@@ -110,6 +116,14 @@ def suppress_false_positive(
             kill = np.zeros(mag.shape, dtype=bool)
             for i in range(1, n):  # 0번은 배경
                 if stats[i, cv2.CC_STAT_AREA] > area_limit:
+                    if coherent_only:
+                        m = (lbl == i)
+                        vx = flow[..., 0][m]; vy = flow[..., 1][m]
+                        denom = float(np.sqrt(vx ** 2 + vy ** 2).sum()) + 1e-6
+                        coh = float(np.sqrt(vx.sum() ** 2 + vy.sum() ** 2)) / denom
+                        # coh→1: 같은 방향(강체=손) → 제거 / coh→0: 난류(가스) → 유지
+                        if coh < coherence_thresh:
+                            continue
                     kill |= (lbl == i)
             flow[kill] = 0.0
 

@@ -62,6 +62,11 @@ ALARM_MIN_HITS = 4         # 창 안에서 이만큼 임계 초과해야 경보
 
 WINDOW = "Real-time BOS AI Detection"
 
+# 카메라 캡처 해상도 프리셋 ('Res' 슬라이더로 전환). iPhone Continuity Camera 영상 최대=4K.
+# (48MP 는 사진 전용이라 영상 스트림으로는 안 나옴 → 영상 최대 화질은 3840x2160)
+RES_PRESETS = [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)]
+DEFAULT_RES_IDX = 1        # 시작은 1080p
+
 # ─── 사인파 경보음 ───────────────────────────────────────────────────
 ALARM_WAV = os.path.join(tempfile.gettempdir(), "bos_alarm.wav")
 ALARM_REPEAT_SEC = 1.3     # 경보 지속 시 이 간격으로 반복 재생
@@ -153,7 +158,8 @@ def _fit_h(img, h):
     return cv2.resize(img, (max(1, int(round(iw * h / ih))), h))
 
 
-def compose_view(left_bgr, flow_norm, prob, hist, thr, alarm, buffering):
+def compose_view(left_bgr, flow_norm, prob, hist, thr, alarm, buffering,
+                 cap_res=None, supp=None):
     """좌(카메라 ROI) | 우(BOS 히트맵) + 상단 확률 헤더 + 하단 6프레임 조건 표시."""
     left = _fit_h(left_bgr, PANEL_H).copy()
     right = _fit_h(bos_heatmap(flow_norm), PANEL_H)
@@ -207,6 +213,15 @@ def compose_view(left_bgr, flow_norm, prob, hist, thr, alarm, buffering):
     cv2.putText(footer, "drag/r: ROI   q: quit", (W - 270, 100),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (170, 170, 170), 1)
 
+    # 캡처 해상도 + 억제 파라미터 상태
+    info = ""
+    if cap_res:
+        info += f"Cap {cap_res[0]}x{cap_res[1]}   "
+    if supp:
+        info += f"minMove {supp[0]:.3f}  ceil {supp[1]:.2f}  keepGas {'ON' if supp[2] else 'off'}"
+    if info:
+        cv2.putText(footer, info, (18, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (160, 210, 160), 1)
+
     view = np.vstack([header, mid, footer])
     if alarm:
         cv2.rectangle(view, (0, 0), (view.shape[1] - 1, view.shape[0] - 1), (0, 0, 255), 12)
@@ -242,36 +257,65 @@ def main():
     if not cap.isOpened():
         print("[ERROR] 카메라를 열 수 없습니다.")
         return
+    # 시작 해상도 적용 (이후 'Res' 슬라이더로 변경 가능)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, RES_PRESETS[DEFAULT_RES_IDX][0])
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, RES_PRESETS[DEFAULT_RES_IDX][1])
     ok, first = cap.read()
     if not ok:
         print("[ERROR] 카메라에서 첫 프레임을 읽지 못했습니다.")
         return
 
     cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
+    print(f"[INFO] 캡처 해상도: {int(cap.get(3))}x{int(cap.get(4))}")
     print("[INFO] 마우스로 BOS 영역(가스가 보이는 부분)을 드래그한 뒤 ENTER. 전체를 쓰려면 그냥 ENTER.")
     roi = select_roi(first)
     print(f"[INFO] ROI = {roi if roi else '전체 화면'}")
 
-    # 실시간 임계값 슬라이더 (오탐/미탐 균형을 화면에서 즉석 조절)
+    # ── 실시간 조절 슬라이더 ───────────────────────────────────────
+    cv2.createTrackbar("Res", WINDOW, DEFAULT_RES_IDX, len(RES_PRESETS) - 1, lambda v: None)
     cv2.createTrackbar("Thr%", WINDOW, int(THRESHOLD * 100), 95, lambda v: None)
+    # 아래 두 개는 BOS 신호 억제 실험용 (기본값은 학습과 동일 → 모델 정확)
+    cv2.createTrackbar("MinMove x1000", WINDOW, int(bc.DEADZONE_LO * 1000), 200, lambda v: None)
+    cv2.createTrackbar("Ceil x100", WINDOW, int(bc.CEILING_HI * 100), 300, lambda v: None)
+    cv2.createTrackbar("KeepGas", WINDOW, 0, 1, lambda v: None)   # 1=난류(가스)는 지우지 않음
 
-    # EMA 배경: 학습과 동일하게 float32, 크롭 영역 기준으로 초기화
-    ema_bg = bc.to_gray_resized(crop(first, roi))
+    cur_res = DEFAULT_RES_IDX
+    ema_bg = None              # 첫 프레임(또는 해상도/ROI 변경 후)에서 재초기화
     flow_buffer = collections.deque(maxlen=CHUNK_SIZE)
     alarm_hist = collections.deque(maxlen=ALARM_WINDOW)
     last_alarm_play = 0.0
 
     print("[INFO] 실시간 탐지 시작. (r: ROI 재설정, q: 종료)")
     while True:
+        # 해상도 변경 감지 → 적용 + ROI/배경 초기화
+        ridx = cv2.getTrackbarPos("Res", WINDOW)
+        if ridx != cur_res:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, RES_PRESETS[ridx][0])
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, RES_PRESETS[ridx][1])
+            cur_res = ridx
+            roi = None
+            ema_bg = None
+            flow_buffer.clear(); alarm_hist.clear()
+            print(f"[INFO] 해상도 → {int(cap.get(3))}x{int(cap.get(4))} (ROI 초기화, 'r'로 재설정 가능)")
+
         ok, frame = cap.read()
         if not ok:
             break
 
         region = crop(frame, roi)
         curr_gray = bc.to_gray_resized(region)
+        if ema_bg is None:                       # 배경 재초기화 (해상도/ROI 변경 직후)
+            ema_bg = curr_gray.copy()
+            continue
 
-        # ── 학습과 완전히 동일한 신호 경로 ───────────────────────────
-        flow_norm, ema_bg = bc.process_pair(ema_bg, curr_gray)
+        # BOS 신호 억제 파라미터 (실험용 슬라이더; 기본값은 학습과 동일)
+        min_move = cv2.getTrackbarPos("MinMove x1000", WINDOW) / 1000.0
+        ceil = max(0.05, cv2.getTrackbarPos("Ceil x100", WINDOW) / 100.0)
+        keep_gas = cv2.getTrackbarPos("KeepGas", WINDOW) == 1
+
+        # ── 학습과 동일한 신호 경로 (슬라이더로 억제 파라미터만 덮어씀) ──
+        flow_norm, ema_bg = bc.process_pair(ema_bg, curr_gray,
+                                            lo=min_move, hi=ceil, coherent_only=keep_gas)
         flow_in = cv2.resize(flow_norm, (IMG_SIZE, IMG_SIZE))
         flow_buffer.append(flow_in)
 
@@ -297,7 +341,9 @@ def main():
         # ── 화면 표시: 좌(카메라 ROI) | 우(BOS 강도 히트맵) ──────────
         view = compose_view(region, flow_norm,
                             prob if prob is not None else 0.0,
-                            alarm_hist, thr, alarm, buffering=(prob is None))
+                            alarm_hist, thr, alarm, buffering=(prob is None),
+                            cap_res=(int(cap.get(3)), int(cap.get(4))),
+                            supp=(min_move, ceil, keep_gas))
         cv2.imshow(WINDOW, view)
 
         key = cv2.waitKey(1) & 0xFF
@@ -307,9 +353,8 @@ def main():
             ok2, f2 = cap.read()
             if ok2:
                 roi = select_roi(f2)
-                ema_bg = bc.to_gray_resized(crop(f2, roi))
-                flow_buffer.clear()
-                alarm_hist.clear()
+                ema_bg = None
+                flow_buffer.clear(); alarm_hist.clear()
                 print(f"[INFO] ROI 재설정: {roi if roi else '전체 화면'}")
 
     cap.release()
