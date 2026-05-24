@@ -134,44 +134,83 @@ def crop(frame, roi):
     return frame[y:y + h, x:x + w]
 
 
-def draw_overlay(frame, prob, hits, thr, alarm, roi, buffering):
-    H, W = frame.shape[:2]
+# ─── 화면 구성 (좌: 카메라 ROI / 우: BOS 강도 히트맵) ────────────────────
+PANEL_H = 480              # 좌·우 패널 표시 높이 (잘리지 않게 비율 유지하며 맞춤)
+HEATMAP_SCALE = 0.6        # 흐름 magnitude → 색 강도 스케일 (작을수록 민감)
 
-    # ROI 박스 (경보 시 빨강)
-    if roi is not None:
-        x, y, w, h = roi
-        col = (0, 0, 255) if alarm else (0, 220, 0)
-        cv2.rectangle(frame, (x, y), (x + w, y + h), col, 3)
-        cv2.putText(frame, "BOS ROI", (x, max(22, y - 8)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2)
 
-    # 상단 정보 패널
-    cv2.rectangle(frame, (0, 0), (W, 130), (0, 0, 0), -1)
+def bos_heatmap(flow_norm):
+    """정규화된 흐름(HxWx2)을 강도 기반 컬러맵으로 시각화 (정도에 따라 색)."""
+    mag = np.sqrt((flow_norm ** 2).sum(axis=2))
+    vis = np.clip(mag / HEATMAP_SCALE * 255.0, 0, 255).astype(np.uint8)
+    cmap = getattr(cv2, "COLORMAP_TURBO", cv2.COLORMAP_JET)
+    return cv2.applyColorMap(vis, cmap)
+
+
+def _fit_h(img, h):
+    """세로를 h로 맞추되 비율 유지 (크롭 없음)."""
+    ih, iw = img.shape[:2]
+    return cv2.resize(img, (max(1, int(round(iw * h / ih))), h))
+
+
+def compose_view(left_bgr, flow_norm, prob, hist, thr, alarm, buffering):
+    """좌(카메라 ROI) | 우(BOS 히트맵) + 상단 확률 헤더 + 하단 6프레임 조건 표시."""
+    left = _fit_h(left_bgr, PANEL_H).copy()
+    right = _fit_h(bos_heatmap(flow_norm), PANEL_H)
+    cv2.putText(left, "CAMERA", (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    cv2.putText(right, "BOS (intensity)", (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    mid = np.hstack([left, right])
+    W = mid.shape[1]
+
+    # ── 헤더: 큰 확률(%) ──
+    header = np.zeros((130, W, 3), np.uint8)
     if buffering:
-        cv2.putText(frame, f"Buffering... {hits}/{CHUNK_SIZE}", (20, 85),
+        cv2.putText(header, f"Buffering... {len(hist)}/{CHUNK_SIZE}", (20, 82),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.3, (200, 200, 200), 2)
     else:
-        # 큰 확률 (초록 0% → 빨강 100%)
-        color = (0, int(255 * (1 - prob)), int(255 * prob))
-        cv2.putText(frame, f"{prob * 100:5.1f}%", (15, 105),
-                    cv2.FONT_HERSHEY_SIMPLEX, 3.2, color, 7)
-        cv2.putText(frame, "GAS", (W - 170, 55),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.3, color, 3)
-        cv2.putText(frame, f"hits {hits}/{ALARM_WINDOW}   thr {thr:.2f}",
-                    (W - 320, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (210, 210, 210), 2)
-
-    # 경보 배너 (큰 글씨 + 빨간 테두리)
+        color = (0, int(255 * (1 - prob)), int(255 * prob))   # 초록→빨강
+        cv2.putText(header, f"{prob * 100:5.1f}%", (15, 105),
+                    cv2.FONT_HERSHEY_SIMPLEX, 3.4, color, 8)
+        cv2.putText(header, "GAS PROB", (360, 52), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
+        cv2.putText(header, f"thr {thr:.2f}", (360, 98),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (210, 210, 210), 2)
     if alarm:
-        cv2.rectangle(frame, (0, 0), (W, H), (0, 0, 255), 16)
         banner = "WARNING: GAS LEAK DETECTED!"
-        (tw, th), _ = cv2.getTextSize(banner, cv2.FONT_HERSHEY_SIMPLEX, 1.4, 4)
-        cx = max(10, (W - tw) // 2)
-        cv2.rectangle(frame, (cx - 18, H - 95), (cx + tw + 18, H - 30), (0, 0, 255), -1)
-        cv2.putText(frame, banner, (cx, H - 48),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.4, (255, 255, 255), 4)
+        (tw, _), _ = cv2.getTextSize(banner, cv2.FONT_HERSHEY_SIMPLEX, 1.1, 3)
+        cv2.putText(header, banner, (max(15, W - tw - 20), 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 0, 255), 3)
 
-    cv2.putText(frame, "drag: ROI   r: reset ROI   q: quit", (20, H - 14),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 180), 2)
+    # ── 푸터: 경보 규칙 + 최근 6프레임 조건 표시 ──
+    footer = np.zeros((128, W, 3), np.uint8)
+    hits = sum(hist)
+    cv2.putText(footer,
+                f"ALARM RULE: GAS when >= {ALARM_MIN_HITS} of last {ALARM_WINDOW} frames exceed threshold"
+                f"   (now {hits}/{ALARM_WINDOW})",
+                (18, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (235, 235, 235), 1)
+    bw, bh, gap, x0, y0 = 78, 44, 12, 18, 42
+    L = list(hist)  # 오래된→최신
+    for i in range(ALARM_WINDOW):
+        x = x0 + i * (bw + gap)
+        if i < len(L):
+            col = (0, 200, 0) if L[i] == 1 else (45, 45, 45)   # 초과=초록, 미달=짙은회색
+        else:
+            col = (28, 28, 28)                                  # 아직 안 채워짐
+        cv2.rectangle(footer, (x, y0), (x + bw, y0 + bh), col, -1)
+        cv2.rectangle(footer, (x, y0), (x + bw, y0 + bh), (120, 120, 120), 1)
+        mark = "OK" if (i < len(L) and L[i] == 1) else "-"
+        cv2.putText(footer, mark, (x + 26, y0 + 29), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(footer, f"t-{ALARM_WINDOW - 1 - i}", (x + 20, y0 + bh + 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
+    status = "ALARM" if alarm else "monitoring"
+    scol = (0, 0, 255) if alarm else (160, 160, 160)
+    cv2.putText(footer, status, (W - 200, 56), cv2.FONT_HERSHEY_SIMPLEX, 1.0, scol, 2)
+    cv2.putText(footer, "drag/r: ROI   q: quit", (W - 270, 100),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (170, 170, 170), 1)
+
+    view = np.vstack([header, mid, footer])
+    if alarm:
+        cv2.rectangle(view, (0, 0), (view.shape[1] - 1, view.shape[0] - 1), (0, 0, 255), 12)
+    return view
 
 
 def main():
@@ -255,10 +294,11 @@ def main():
                 play_alarm()
                 last_alarm_play = now
 
-        # ── 화면 표시 ────────────────────────────────────────────────
-        draw_overlay(frame, prob if prob is not None else 0.0,
-                     sum(alarm_hist), thr, alarm, roi, buffering=(prob is None))
-        cv2.imshow(WINDOW, frame)
+        # ── 화면 표시: 좌(카메라 ROI) | 우(BOS 강도 히트맵) ──────────
+        view = compose_view(region, flow_norm,
+                            prob if prob is not None else 0.0,
+                            alarm_hist, thr, alarm, buffering=(prob is None))
+        cv2.imshow(WINDOW, view)
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
