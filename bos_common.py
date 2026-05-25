@@ -1,40 +1,48 @@
 """
-BOS 공용 전처리 모듈 — 학습(1_preprocess.py)과 실시간 추론(3_realtime_detect1.py)이
-**완전히 동일한** 신호 처리를 쓰도록 단일 진실 공급원(single source of truth)을 제공한다.
+BOS 공용 전처리 모듈 — 학습(1_preprocess.py)과 추론(3_/4_)이 **완전히 동일한**
+신호 처리를 쓰도록 하는 단일 진실 공급원(single source of truth).
 
 여기 값을 바꾸면 학습/추론 양쪽이 자동으로 함께 바뀌므로 둘 사이의
 입력 분포 불일치(train/inference skew)가 원천적으로 발생하지 않는다.
 
-신호 처리 순서 (양쪽 동일):
-  1. 프레임을 RESIZE 해상도 그레이스케일로 변환
-  2. EMA 배경(느린 변화 흡수) ↔ 현재 프레임 사이의 Farneback Optical Flow
+■ 신호 추출 방식: **연속 프레임 흐름 + 전역 움직임 보정(GMC)**  (2026-05-25 재설계)
+  - 이전 'EMA 배경' 방식은 *지속적* 플룸을 배경으로 흡수해버리고(켜둔 상태=배경) fps에
+    의존해 폐기. 삼각대 고정을 전제로 직전 프레임과의 흐름을 본다.
+
+■ 신호 처리 순서 (학습/추론 동일):
+  1. 프레임을 RESIZE(고해상도) 그레이스케일로 변환
+  2. **직전 프레임 ↔ 현재 프레임** Farneback Optical Flow
   3. FP 억제:
-       (a) 전역 모션 상쇄  — 카메라 흔들림/팬 제거           → "가만히 있어도 경보" 방지
-       (b) 하한 데드존     — 센서 노이즈/조명 깜빡임 제거      → "가만히 있어도 경보" 방지
-       (c) 상한 클리핑     — 사람/차량 같은 큰 강체 움직임 제거 → "사람만 움직여도 경보" 방지
-       (d) 응집 블롭 제거  — 사람처럼 큰 한 덩어리 움직임 제거  → "사람만 움직여도 경보" 방지
-  4. 채널별 percentile 정규화 ([-1, 1], 단 노이즈 뻥튀기 방지 하한 적용)
+       (a) GMC          — 프레임 전역 중앙값 흐름 차감 (삼각대 미세드리프트/팬 제거)
+       (b) 하한 데드존  — 배경 센서 노이즈 제거
+       (c) 상한 클리핑  — 사람/손 등 큰 강체 움직임 제거 (가스 플룸은 보존)
+       (d) 응집 블롭 제거 — 기본 OFF. 가스 플룸은 '큰 연결 난류'라 제거하면 신호가 죽는다.
+  4. 채널별 percentile 정규화 ([-1, 1], MIN_DENOM 하한)
+
+■ 해상도 주의 (중요): 흐름은 RESIZE(720)에서 계산한다. 224로 줄이면 서브픽셀 BOS 왜곡이
+  평균돼 신호가 소실됨 — C0121 검증: 동일 플룸 영역이 native 0.50 → 224 0.10(배경수준)으로 폭락.
+  모델 입력(112)은 흐름 계산 *후* 청크 저장/로드 단계에서 축소하므로 고해상도 흐름의 신호가 보존된다.
 """
 
 import cv2
 import numpy as np
 
 # ─── 핵심 상수 (학습/추론 공통) ────────────────────────────────────────────────
-RESIZE = (224, 224)        # (H, W) — Optical Flow를 항상 이 해상도에서 계산.
-                           #          (흐름 크기는 해상도에 비례하므로 반드시 고정)
-EMA_ALPHA = 0.05           # EMA 배경 갱신 속도 (작을수록 배경이 더 안정적)
+RESIZE = (720, 720)        # (H, W) — Optical Flow를 항상 이 해상도에서 계산.
+                           #   고해상도 필수: 224는 서브픽셀 플룸 신호를 평균내 소실시킴.
 
-# FP 억제 파라미터 — 단위는 RESIZE 해상도에서의 픽셀 변위(magnitude)
-GMC = True                 # 전역 모션 상쇄 (카메라 흔들림/팬 제거) 사용 여부
-DEADZONE_LO = 0.03         # |v| < LO 인 흐름은 0  (노이즈/조명 깜빡임 → 가스 아님). 224×224 스케일에서 가스 신호는 ~0.03~0.1
-CEILING_HI = 0.5           # |v| > HI 인 흐름은 0  (사람/차량 등 큰 강체 움직임 → 가스 아님). 일반 모션 max ~0.27, 사람급은 ~0.5+
-COHERENCE = True           # 큰 응집 블롭(사람 형태) 제거 사용 여부
-BLOB_AREA_FRAC = 0.04      # 프레임 면적의 이 비율보다 큰 한 덩어리 움직임은 가스 아님 → 제거
+# FP 억제 파라미터 — 단위는 RESIZE(720) 해상도에서의 픽셀 변위(magnitude).
+#   C0121(삼각대+라이터, 연속프레임+GMC) 측정: 배경 p50≈0.06,
+#   플룸 p90≈0.25 / p99≈0.94 / max≈2.9,  손 등 전환 움직임 max≈40.
+GMC = True                 # 전역 움직임 보정 (중앙값 흐름 차감 — 삼각대 미세드리프트/팬 제거)
+DEADZONE_LO = 0.10         # |v| < LO 제거 (배경 노이즈). 플룸(>0.1)은 보존
+CEILING_HI = 6.0           # |v| > HI 제거 (손/사람 등 큰 강체). 플룸 max≈2.9 < 6 → 보존
+COHERENCE = False          # 큰 응집 블롭 제거 — 기본 OFF. 가스 플룸=큰 난류라 켜면 신호가 죽음.
+BLOB_AREA_FRAC = 0.10      # (coherence=True 일 때만) 이 면적비보다 큰 덩어리 검사 대상
 
-# 정규화 노이즈 뻥튀기 방지 하한 (RESIZE 해상도 픽셀 단위)
-#   percentile 폭이 이 값보다 작으면 "실질적 움직임 없음"으로 보고 분모를 고정.
-#   → 가만히 있을 때 미세 노이즈가 [-1,1]로 확대되어 가스처럼 보이는 현상을 차단.
-MIN_DENOM = 0.05
+# 정규화 노이즈 뻥튀기 방지 하한 (RESIZE 해상도 픽셀 단위).
+#   percentile 폭이 이 값보다 작으면 "실질적 움직임 없음"으로 보고 채널을 0으로.
+MIN_DENOM = 0.20
 
 # Farneback Optical Flow 파라미터 (학습/추론 공통)
 FB_PARAMS = {
@@ -58,7 +66,7 @@ def to_gray_resized(frame_bgr: np.ndarray) -> np.ndarray:
 
 def compute_flow(prev_gray_f32: np.ndarray, curr_gray_f32: np.ndarray) -> np.ndarray:
     """
-    EMA 배경(prev)과 현재 프레임(curr) 사이의 Farneback Dense Optical Flow.
+    직전 프레임(prev)과 현재 프레임(curr) 사이의 Farneback Dense Optical Flow.
     반환 shape: (H, W, 2) float32  [채널 0=dx, 1=dy]
     """
     flow = cv2.calcOpticalFlowFarneback(
@@ -83,31 +91,29 @@ def suppress_false_positive(
     """
     오탐 억제 필터. **학습/추론 양쪽에서 동일하게 호출**되어야 한다.
 
-    - 가스 BOS 신호  : 작고(저~중 magnitude) 공간적으로 흩어진 난류
-    - 카메라 흔들림   : 화면 전체가 같은 방향 (전역)        → (a)로 제거
-    - 센서/조명 노이즈: 매우 작은 magnitude                 → (b)로 제거
-    - 사람/차량/문    : 크고(고 magnitude) 한 덩어리로 응집  → (c)(d)로 제거
+    - 가스 BOS 신호 : 위로 솟아 휘말리는 난류 (큰 연결 영역, 중간 magnitude) → 보존해야 함
+    - 카메라 드리프트: 화면 전체가 같은 방향 (전역)        → (a) GMC로 제거
+    - 센서 노이즈    : 매우 작은 magnitude                 → (b) 데드존으로 제거
+    - 사람/손        : 매우 큰 magnitude                   → (c) 상한으로 제거
 
-    coherent_only=True (난류 인식): 큰 블롭이라도 '방향이 일관된(강체)' 것만 제거하고,
-      방향이 제각각인 '난류'(가스로 추정)는 유지한다. → 손은 지우되 큰 가스는 살림.
-      coherence_thresh: 블롭의 방향 일관성( |Σv| / Σ|v| , 1=강체·0=난류 ) 이 값 이상이면 제거.
+    coherence=True(기본 OFF) 사용 시: coherent_only=True면 큰 블롭 중 '방향 일관(강체)'만
+      제거하고 난류(가스)는 유지. 가스 탐지에선 플룸을 죽일 위험이 커 기본 비활성.
     """
     flow = flow.copy()
 
-    # (a) 전역 모션 상쇄: 중앙값(median)은 평균보다 큰 국소 움직임에 강건.
+    # (a) 전역 움직임 보정: 중앙값(median)은 국소 플룸에 강건 → 삼각대 미세 드리프트/팬 제거.
     if gmc:
         flow[..., 0] -= np.median(flow[..., 0])
         flow[..., 1] -= np.median(flow[..., 1])
 
     mag = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
 
-    # (b) 하한 데드존: 가스도 아닌 미세 노이즈 제거 ("가만히 있어도 경보" 방지)
+    # (b) 하한 데드존: 배경 노이즈 제거 (플룸보다 작은 magnitude)
     flow[mag < lo] = 0.0
-    # (c) 상한 클리핑: 사람/차량처럼 큰 강체 움직임 제거 ("사람만 움직여도 경보" 방지)
+    # (c) 상한 클리핑: 사람/손 등 큰 강체 움직임 제거 (플룸보다 훨씬 큰 magnitude)
     flow[mag > hi] = 0.0
 
-    # (d) 응집 블롭 제거: 사람은 큰 연결 영역 하나로 움직이지만
-    #     가스 난류는 작고 파편화된 영역들로 흩어진다. 큰 덩어리만 골라 제거.
+    # (d) 응집 블롭 제거: 기본 OFF. 가스 플룸은 큰 연결 난류라 켜면 신호가 통째로 잘린다.
     if coherence:
         moving = ((mag >= lo) & (mag <= hi)).astype(np.uint8)
         if moving.any():
@@ -134,38 +140,29 @@ def normalize_flow_robust(flow: np.ndarray) -> np.ndarray:
     """
     채널별 percentile(1~99) 정규화 → [-1, 1] 클리핑.
 
-    핵심: 분모에 MIN_DENOM 하한을 둬서, 실질적 움직임이 없을 때
-    미세 노이즈가 [-1, 1] 전체로 확대되는 것을 막는다.
-    (이것이 "가만히 있어도 경보"의 신호 단계 근본 원인 차단)
+    분모에 MIN_DENOM 하한을 둬서, 실질적 움직임이 없을 때 미세 노이즈가
+    [-1, 1] 전체로 확대되는 것을 막는다.
     """
     out = np.zeros_like(flow, dtype=np.float32)
     for c in range(2):
         ch = flow[:, :, c]
         p1, p99 = np.percentile(ch, [1, 99])
         rng = p99 - p1
-        # 신호 미약(rng < MIN_DENOM)일 때 채널을 0으로 둠.
-        # 이전 코드는 (ch - p1)/MIN_DENOM*2-1 로 매핑해 "신호 없음"을 -1로 채우는 버그가 있었음.
         if rng < MIN_DENOM:
             continue
         out[:, :, c] = np.clip((ch - p1) / rng * 2.0 - 1.0, -1.0, 1.0)
     return out
 
 
-def update_ema(ema_bg_f32: np.ndarray, curr_gray_f32: np.ndarray,
-                alpha: float = EMA_ALPHA) -> np.ndarray:
-    """EMA 배경 갱신 (float32 유지 — uint8 누적 시 정밀도 손실 방지)."""
-    return (1.0 - alpha) * ema_bg_f32 + alpha * curr_gray_f32
-
-
-def process_pair(ema_bg_f32: np.ndarray, curr_gray_f32: np.ndarray, **sup_kwargs):
+def process_pair(prev_gray_f32: np.ndarray, curr_gray_f32: np.ndarray, **sup_kwargs):
     """
     한 프레임 처리 파이프라인 전체를 한 번에 수행.
     학습/추론이 글자 그대로 같은 코드를 타도록 보장하는 진입점.
 
-    반환: (정규화된 흐름 (H,W,2) float32,  갱신된 EMA 배경 float32)
+    인자: prev_gray_f32 = 직전 프레임, curr_gray_f32 = 현재 프레임 (둘 다 to_gray_resized 출력)
+    반환: (정규화된 흐름 (H,W,2) float32,  다음 호출의 prev로 쓸 현재 프레임 float32)
     """
-    flow = compute_flow(ema_bg_f32, curr_gray_f32)
+    flow = compute_flow(prev_gray_f32, curr_gray_f32)
     flow = suppress_false_positive(flow, **sup_kwargs)
     flow_norm = normalize_flow_robust(flow)
-    ema_bg_f32 = update_ema(ema_bg_f32, curr_gray_f32)
-    return flow_norm, ema_bg_f32
+    return flow_norm, curr_gray_f32

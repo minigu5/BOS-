@@ -1,7 +1,7 @@
 """
 실시간 BOS 가스 누출 탐지 (웹캠)
 
-  - 흐름 계산·FP 억제·정규화·EMA 배경을 전부 bos_common 에서 가져온다.
+  - 연속프레임 흐름·GMC·FP 억제·정규화를 전부 bos_common 에서 가져온다.
     → 학습(1_preprocess.py)과 글자 그대로 동일한 입력 분포. (train/inference skew 제거)
   - 모델 구조는 2_train.py 의 BOS3DCNN 을 그대로 import.
 
@@ -276,11 +276,11 @@ def main():
     cv2.createTrackbar("Thr%", WINDOW, int(THRESHOLD * 100), 95, lambda v: None)
     # 아래 두 개는 BOS 신호 억제 실험용 (기본값은 학습과 동일 → 모델 정확)
     cv2.createTrackbar("MinMove x1000", WINDOW, int(bc.DEADZONE_LO * 1000), 200, lambda v: None)
-    cv2.createTrackbar("Ceil x100", WINDOW, int(bc.CEILING_HI * 100), 300, lambda v: None)
+    cv2.createTrackbar("Ceil x100", WINDOW, int(bc.CEILING_HI * 100), 1000, lambda v: None)
     cv2.createTrackbar("KeepGas", WINDOW, 0, 1, lambda v: None)   # 1=난류(가스)는 지우지 않음
 
     cur_res = DEFAULT_RES_IDX
-    ema_bg = None              # 첫 프레임(또는 해상도/ROI 변경 후)에서 재초기화
+    prev_gray = None              # 첫 프레임(또는 해상도/ROI 변경 후)에서 재초기화
     flow_buffer = collections.deque(maxlen=CHUNK_SIZE)
     alarm_hist = collections.deque(maxlen=ALARM_WINDOW)
     last_alarm_play = 0.0
@@ -294,7 +294,7 @@ def main():
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, RES_PRESETS[ridx][1])
             cur_res = ridx
             roi = None
-            ema_bg = None
+            prev_gray = None
             flow_buffer.clear(); alarm_hist.clear()
             print(f"[INFO] 해상도 → {int(cap.get(3))}x{int(cap.get(4))} (ROI 초기화, 'r'로 재설정 가능)")
 
@@ -304,8 +304,8 @@ def main():
 
         region = crop(frame, roi)
         curr_gray = bc.to_gray_resized(region)
-        if ema_bg is None:                       # 배경 재초기화 (해상도/ROI 변경 직후)
-            ema_bg = curr_gray.copy()
+        if prev_gray is None:                       # 배경 재초기화 (해상도/ROI 변경 직후)
+            prev_gray = curr_gray.copy()
             continue
 
         # BOS 신호 억제 파라미터 (실험용 슬라이더; 기본값은 학습과 동일)
@@ -314,7 +314,7 @@ def main():
         keep_gas = cv2.getTrackbarPos("KeepGas", WINDOW) == 1
 
         # ── 학습과 동일한 신호 경로 (슬라이더로 억제 파라미터만 덮어씀) ──
-        flow_norm, ema_bg = bc.process_pair(ema_bg, curr_gray,
+        flow_norm, prev_gray = bc.process_pair(prev_gray, curr_gray,
                                             lo=min_move, hi=ceil, coherent_only=keep_gas)
         flow_in = cv2.resize(flow_norm, (IMG_SIZE, IMG_SIZE))
         flow_buffer.append(flow_in)
@@ -353,7 +353,7 @@ def main():
             ok2, f2 = cap.read()
             if ok2:
                 roi = select_roi(f2)
-                ema_bg = None
+                prev_gray = None
                 flow_buffer.clear(); alarm_hist.clear()
                 print(f"[INFO] ROI 재설정: {roi if roi else '전체 화면'}")
 

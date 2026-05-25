@@ -48,6 +48,8 @@ def main():
     ap.add_argument("--ref_sec", type=float, default=0.0,
                     help=">0이면 [ref_start,ref_sec) 평균을 정적 reference로, ON 프레임을 그 기준과 비교(steady 플룸 검출)")
     ap.add_argument("--ref_start", type=float, default=0.0, help="정적 reference 구축 시작 시각")
+    ap.add_argument("--gmc", action="store_true",
+                    help="전역 움직임 보정: 프레임마다 중앙값 흐름을 빼서 카메라/리그 흔들림 제거 → 국소 플룸만 남김")
     ap.add_argument("--out", default="bos_diag_out")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -98,6 +100,9 @@ def main():
                 if (ref_gray is not None and t >= a.start_sec
                         and (a.end_sec <= 0 or t < a.end_sec) and ref_gray.shape == g.shape):
                     fr = cv2.calcOpticalFlowFarneback(ref_gray, g, None, **FB)
+                    if a.gmc:
+                        fr[..., 0] -= np.median(fr[..., 0])
+                        fr[..., 1] -= np.median(fr[..., 1])
                     mr = np.sqrt(fr[..., 0] ** 2 + fr[..., 1] ** 2)
                     vacc = mr.copy() if vacc is None else vacc + mr
                     vcnt += 1
@@ -105,6 +110,9 @@ def main():
 
             if prev is not None:
                 flow = cv2.calcOpticalFlowFarneback(prev, g, None, **FB)
+                if a.gmc:
+                    flow[..., 0] -= np.median(flow[..., 0])
+                    flow[..., 1] -= np.median(flow[..., 1])
                 mag = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
                 means.append(float(mag.mean()))
                 p99s.append(float(np.percentile(mag, 99)))

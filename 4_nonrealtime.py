@@ -148,11 +148,11 @@ def main():
     cv2.createTrackbar("Res", WINDOW, res_idx, len(RES_PRESETS) - 1, lambda v: None)
     cv2.createTrackbar("Thr%", WINDOW, int(THRESHOLD * 100), 95, lambda v: None)
     cv2.createTrackbar("MinMove x1000", WINDOW, int(bc.DEADZONE_LO * 1000), 200, lambda v: None)
-    cv2.createTrackbar("Ceil x100", WINDOW, int(bc.CEILING_HI * 100), 300, lambda v: None)
+    cv2.createTrackbar("Ceil x100", WINDOW, int(bc.CEILING_HI * 100), 1000, lambda v: None)
     cv2.createTrackbar("KeepGas", WINDOW, 0, 1, lambda v: None)
 
     cur_res = res_idx
-    ema_bg = bc.to_gray_resized(crop(resize_to(first, res_idx), roi))
+    prev_gray = bc.to_gray_resized(crop(resize_to(first, res_idx), roi))
     flow_buffer = collections.deque(maxlen=CHUNK_SIZE)
     alarm_hist = collections.deque(maxlen=ALARM_WINDOW)
     last_alarm_play = 0.0
@@ -166,7 +166,7 @@ def main():
             ok, frame = cap.read()
             if not ok:                      # 끝 → 처음부터 자동 반복
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                ema_bg = None
+                prev_gray = None
                 flow_buffer.clear(); alarm_hist.clear()
                 continue
 
@@ -174,22 +174,22 @@ def main():
             ridx = cv2.getTrackbarPos("Res", WINDOW)
             if ridx != cur_res:
                 cur_res = ridx
-                roi = None; ema_bg = None
+                roi = None; prev_gray = None
                 flow_buffer.clear(); alarm_hist.clear()
                 print(f"[INFO] 처리 해상도 → {RES_PRESETS[ridx]} (ROI 초기화, r 로 재설정)")
 
             frame_proc = resize_to(frame, cur_res)
             region = crop(frame_proc, roi)
             curr_gray = bc.to_gray_resized(region)
-            if ema_bg is None:              # 재시작/ROI변경/Res변경 직후 배경 재초기화
-                ema_bg = curr_gray.copy()
+            if prev_gray is None:              # 재시작/ROI변경/Res변경 직후 배경 재초기화
+                prev_gray = curr_gray.copy()
                 continue
 
             min_move = cv2.getTrackbarPos("MinMove x1000", WINDOW) / 1000.0
             ceil = max(0.05, cv2.getTrackbarPos("Ceil x100", WINDOW) / 100.0)
             keep_gas = cv2.getTrackbarPos("KeepGas", WINDOW) == 1
 
-            flow_norm, ema_bg = bc.process_pair(ema_bg, curr_gray,
+            flow_norm, prev_gray = bc.process_pair(prev_gray, curr_gray,
                                                 lo=min_move, hi=ceil, coherent_only=keep_gas)
             flow_in = cv2.resize(flow_norm, (IMG_SIZE, IMG_SIZE))
             flow_buffer.append(flow_in)
@@ -236,13 +236,13 @@ def main():
             paused = not paused
         elif key == ord('b'):                 # 처음부터 다시
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            ema_bg = None
+            prev_gray = None
             flow_buffer.clear(); alarm_hist.clear()
             paused = False
             print("[INFO] 처음부터 다시 재생")
         elif key == ord('r'):                 # ROI 재설정 (현재 처리 해상도 기준)
             roi = select_roi(resize_to(frame, cur_res))
-            ema_bg = None
+            prev_gray = None
             flow_buffer.clear(); alarm_hist.clear()
             print(f"[INFO] ROI 재설정: {roi if roi else '전체 화면'}")
 

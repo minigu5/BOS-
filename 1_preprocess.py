@@ -4,7 +4,7 @@ BOS 데이터 전처리 프로그램
     Farneback Optical Flow(BOS 신호)를 16프레임 단위 청크로 변환하여
     output_dataset/Gas/ 또는 output_dataset/Normal/ 에 .npy 파일로 저장한다.
 
-  - 신호 처리(흐름 계산·FP 억제·정규화·EMA 배경)는 전부 bos_common 에서 가져온다.
+  - 신호 처리(연속프레임 흐름·GMC·FP 억제·정규화)는 전부 bos_common 에서 가져온다.
     → 실시간 추론(3_realtime_detect1.py)과 100% 동일한 입력 분포를 보장.
 
 라벨 지정 방법 (둘 중 아무거나, 혼용 가능):
@@ -16,7 +16,7 @@ BOS 데이터 전처리 프로그램
 
 실행 예시:
   python 1_preprocess.py
-  python 1_preprocess.py --chunk_size 16 --overlap 8 --ema_alpha 0.05
+  python 1_preprocess.py --chunk_size 16 --overlap 8 --save_size 112
 
 ※ FP 억제 파라미터(데드존/상한/블롭)는 bos_common.py 에서 직접 수정해야
   학습/추론이 함께 바뀐다. CLI 로도 덮어쓸 수 있으나, 그 경우 실시간 추론과
@@ -133,7 +133,7 @@ def process_video(
     stride = chunk_size - overlap
 
     flow_buffer = []
-    ema_bg = None  # float32 그레이스케일 EMA 배경
+    prev_gray = None  # float32 그레이스케일 직전 프레임 (연속프레임 흐름용)
 
     H, W = bc.RESIZE
     logger.info(
@@ -149,13 +149,13 @@ def process_video(
 
         curr_gray = bc.to_gray_resized(frame)
 
-        if ema_bg is None:
-            ema_bg = curr_gray.copy()  # 첫 프레임으로 EMA 배경 초기화
+        if prev_gray is None:
+            prev_gray = curr_gray.copy()  # 첫 프레임은 직전 프레임으로만 보관
             pbar.update(1)
             continue
 
-        # 흐름 계산 → FP 억제 → 정규화 → EMA 갱신 (실시간과 완전히 동일한 경로)
-        flow_norm, ema_bg = bc.process_pair(ema_bg, curr_gray, **sup_kwargs)
+        # 연속프레임 흐름 → GMC → FP 억제 → 정규화 (추론과 완전히 동일한 경로)
+        flow_norm, prev_gray = bc.process_pair(prev_gray, curr_gray, **sup_kwargs)
         flow_buffer.append(flow_norm)
         pbar.update(1)
 
@@ -201,10 +201,6 @@ def main():
         "--overlap", type=int, default=DEFAULT_CONFIG["overlap"],
         help="청크 간 오버랩 (stride = chunk_size - overlap)"
     )
-    parser.add_argument(
-        "--ema_alpha", type=float, default=bc.EMA_ALPHA,
-        help=f"EMA 배경 갱신 속도 (기본 {bc.EMA_ALPHA})"
-    )
     # ── FP 억제 고급 옵션 (기본값은 bos_common 과 동일) ───────────────────────
     parser.add_argument("--deadzone_lo", type=float, default=bc.DEADZONE_LO,
                         help=f"하한 데드존 (기본 {bc.DEADZONE_LO}, 노이즈 경보 잦으면 ↑)")
@@ -212,24 +208,23 @@ def main():
                         help=f"상한 클리핑 (기본 {bc.CEILING_HI}, 사람 경보 잦으면 ↓)")
     parser.add_argument("--blob_frac", type=float, default=bc.BLOB_AREA_FRAC,
                         help=f"응집 블롭 면적비 (기본 {bc.BLOB_AREA_FRAC}, 사람 경보 잦으면 ↓)")
-    parser.add_argument("--no_gmc", action="store_true", help="전역 모션 상쇄 끄기")
-    parser.add_argument("--no_coherence", action="store_true", help="응집 블롭 제거 끄기")
-    parser.add_argument("--save_size", type=int, default=0,
-                        help="저장 청크 해상도(px). 0=흐름 계산 해상도 그대로. "
-                             "112 로 주면 모델 입력 크기로 축소 저장(디스크 1/4, 결과 동일)")
+    parser.add_argument("--no_gmc", action="store_true", help="전역 움직임 보정 끄기")
+    parser.add_argument("--coherence", action="store_true",
+                        help="응집 블롭 제거 켜기 (기본 OFF — 가스 플룸은 큰 난류라 보존)")
+    parser.add_argument("--save_size", type=int, default=112,
+                        help="저장 청크 해상도(px). 흐름은 RESIZE(720)에서 계산 후 이 크기로 축소 저장. "
+                             "0=축소 안 함(720 그대로면 청크가 매우 커짐 → 비권장)")
     args = parser.parse_args()
 
     if args.overlap >= args.chunk_size:
         logger.error("overlap은 chunk_size보다 작아야 합니다.")
         sys.exit(1)
 
-    # EMA alpha 를 CLI 로 바꾸면 공용 모듈에도 반영 (학습/추론 일치 유지)
-    bc.EMA_ALPHA = args.ema_alpha
     sup_kwargs = dict(
         gmc=not args.no_gmc,
         lo=args.deadzone_lo,
         hi=args.ceiling_hi,
-        coherence=not args.no_coherence,
+        coherence=args.coherence,
         blob_area_frac=args.blob_frac,
     )
 
@@ -259,7 +254,7 @@ def main():
     logger.info(
         f"설정: chunk_size={args.chunk_size}, overlap={args.overlap}, "
         f"stride={args.chunk_size - args.overlap}, resize={bc.RESIZE}, "
-        f"ema_alpha={bc.EMA_ALPHA}"
+        f"save_size={args.save_size}"
     )
     logger.info(
         f"FP 억제: gmc={sup_kwargs['gmc']}, deadzone_lo={sup_kwargs['lo']}, "
