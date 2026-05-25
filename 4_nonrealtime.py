@@ -152,7 +152,7 @@ def main():
     cv2.createTrackbar("KeepGas", WINDOW, 0, 1, lambda v: None)
 
     cur_res = res_idx
-    prev_gray = bc.to_gray_resized(crop(resize_to(first, res_idx), roi))
+    gray_buffer = collections.deque(maxlen=bc.FRAME_STRIDE)
     flow_buffer = collections.deque(maxlen=CHUNK_SIZE)
     alarm_hist = collections.deque(maxlen=ALARM_WINDOW)
     last_alarm_play = 0.0
@@ -166,7 +166,7 @@ def main():
             ok, frame = cap.read()
             if not ok:                      # 끝 → 처음부터 자동 반복
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                prev_gray = None
+                gray_buffer.clear()
                 flow_buffer.clear(); alarm_hist.clear()
                 continue
 
@@ -174,22 +174,25 @@ def main():
             ridx = cv2.getTrackbarPos("Res", WINDOW)
             if ridx != cur_res:
                 cur_res = ridx
-                roi = None; prev_gray = None
+                roi = None; gray_buffer.clear()
                 flow_buffer.clear(); alarm_hist.clear()
                 print(f"[INFO] 처리 해상도 → {RES_PRESETS[ridx]} (ROI 초기화, r 로 재설정)")
 
             frame_proc = resize_to(frame, cur_res)
             region = crop(frame_proc, roi)
             curr_gray = bc.to_gray_resized(region)
-            if prev_gray is None:              # 재시작/ROI변경/Res변경 직후 배경 재초기화
-                prev_gray = curr_gray.copy()
+            gray_buffer.append(curr_gray)
+
+            if len(gray_buffer) < bc.FRAME_STRIDE:
                 continue
+
+            prev_gray = gray_buffer[0]
 
             min_move = cv2.getTrackbarPos("MinMove x1000", WINDOW) / 1000.0
             ceil = max(0.05, cv2.getTrackbarPos("Ceil x100", WINDOW) / 100.0)
             keep_gas = cv2.getTrackbarPos("KeepGas", WINDOW) == 1
 
-            flow_norm, prev_gray = bc.process_pair(prev_gray, curr_gray,
+            flow_norm, _ = bc.process_pair(prev_gray, curr_gray,
                                                 lo=min_move, hi=ceil, coherent_only=keep_gas)
             flow_in = cv2.resize(flow_norm, (IMG_SIZE, IMG_SIZE))
             flow_buffer.append(flow_in)
