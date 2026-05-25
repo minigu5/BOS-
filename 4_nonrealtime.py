@@ -236,18 +236,23 @@ def main():
             paused = not paused
         elif key == ord('b'):                 # 처음부터 다시
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            prev_gray = None
+            gray_buffer.clear()
             flow_buffer.clear(); alarm_hist.clear()
             paused = False
             print("[INFO] 처음부터 다시 재생")
         elif key == ord('r'):                 # ROI 재설정 (현재 처리 해상도 기준)
             roi = select_roi(resize_to(frame, cur_res))
-            prev_gray = None
+            gray_buffer.clear()
             flow_buffer.clear(); alarm_hist.clear()
             print(f"[INFO] ROI 재설정: {roi if roi else '전체 화면'}")
 
     cap.release()
     cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()
+2.destroyAllWindows()
 
 
 if __name__ == "__main__":

@@ -108,6 +108,11 @@ def suppress_false_positive(
 
     mag = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
 
+    # (a-2) 카메라 심한 흔들림/급격한 조명 변화 무시 (화면의 75% 이상이 움직일 때)
+    if (mag > lo).mean() > 0.75:
+        flow[:] = 0.0
+        return flow
+
     # (b) 하한 데드존: 배경 노이즈 제거 (플룸보다 작은 magnitude)
     flow[mag < lo] = 0.0
     # (c) 상한 클리핑: 사람/손 등 큰 강체 움직임 제거 (플룸보다 훨씬 큰 magnitude)

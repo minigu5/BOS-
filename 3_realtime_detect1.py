@@ -280,7 +280,7 @@ def main():
     cv2.createTrackbar("KeepGas", WINDOW, 0, 1, lambda v: None)   # 1=난류(가스)는 지우지 않음
 
     cur_res = DEFAULT_RES_IDX
-    prev_gray = None              # 첫 프레임(또는 해상도/ROI 변경 후)에서 재초기화
+    gray_buffer = collections.deque(maxlen=bc.FRAME_STRIDE)
     flow_buffer = collections.deque(maxlen=CHUNK_SIZE)
     alarm_hist = collections.deque(maxlen=ALARM_WINDOW)
     last_alarm_play = 0.0
@@ -359,6 +359,11 @@ def main():
 
     cap.release()
     cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()
+ws()
 
 
 if __name__ == "__main__":

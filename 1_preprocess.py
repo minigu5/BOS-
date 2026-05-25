@@ -133,7 +133,7 @@ def process_video(
     stride = chunk_size - overlap
 
     flow_buffer = []
-    prev_gray = None  # float32 그레이스케일 직전 프레임 (연속프레임 흐름용)
+    gray_buffer = collections.deque(maxlen=bc.FRAME_STRIDE)
 
     H, W = bc.RESIZE
     logger.info(
@@ -148,14 +148,16 @@ def process_video(
             break
 
         curr_gray = bc.to_gray_resized(frame)
+        gray_buffer.append(curr_gray)
 
-        if prev_gray is None:
-            prev_gray = curr_gray.copy()  # 첫 프레임은 직전 프레임으로만 보관
+        if len(gray_buffer) < bc.FRAME_STRIDE:
             pbar.update(1)
             continue
 
+        prev_gray = gray_buffer[0]
+
         # 연속프레임 흐름 → GMC → FP 억제 → 정규화 (추론과 완전히 동일한 경로)
-        flow_norm, prev_gray = bc.process_pair(prev_gray, curr_gray, **sup_kwargs)
+        flow_norm, _ = bc.process_pair(prev_gray, curr_gray, **sup_kwargs)
         flow_buffer.append(flow_norm)
         pbar.update(1)
 
@@ -283,6 +285,11 @@ def main():
     if skipped:
         logger.info(f"  레이블 불명으로 건너뜀: {skipped}")
     logger.info(f"  저장 경로: {output_dir.resolve()}")
+    logger.info("=" * 60)
+
+
+if __name__ == "__main__":
+    main()
     logger.info("=" * 60)
 
 

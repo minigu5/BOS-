@@ -355,7 +355,10 @@ class FPPenaltyBCELoss(nn.Module):
     def forward(
         self, logits: torch.Tensor, targets: torch.Tensor
     ) -> torch.Tensor:
-        base_loss = self.bce(logits, targets)
+        # 라벨 스무딩 (Label Smoothing): 1.0 -> 0.9, 0.0 -> 0.1
+        smoothed_targets = targets * 0.8 + 0.1
+        
+        base_loss = self.bce(logits, smoothed_targets)
         # Normal 샘플(target==0)에 추가 가중치
         normal_mask = (targets == 0).float()
         weights = 1.0 + (self.fp_weight - 1.0) * normal_mask
