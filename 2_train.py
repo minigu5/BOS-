@@ -481,15 +481,17 @@ def main() -> None:
                         help="분류 임계값 (기본: 0.5, 높일수록 오탐 감소)")
     parser.add_argument("--num_workers", type=int,  default=DEFAULT_CONFIG["num_workers"])
     parser.add_argument("--seed",        type=int,  default=DEFAULT_CONFIG["seed"])
+    parser.add_argument("--device", default="auto",
+                        help="학습 디바이스: auto/cpu/cuda/mps. (Apple Silicon MPS는 Conv3D 미지원 → cpu 사용)")
     args = parser.parse_args()
 
     set_seed(args.seed)
 
-    device = torch.device(
-        "cuda" if torch.cuda.is_available() else
-        "mps"  if torch.backends.mps.is_available() else
-        "cpu"
-    )
+    if args.device != "auto":
+        device = torch.device(args.device)
+    else:
+        # MPS는 Conv3D 미지원이라 자동선택에서 제외 (cuda 있으면 cuda, 없으면 cpu)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"사용 디바이스: {device}")
 
     # ── 데이터 수집 ──────────────────────────────────────────────────────────

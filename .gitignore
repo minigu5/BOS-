@@ -38,4 +38,18 @@ input_backup_1/
 # BOS 신호 진단 출력 폴더 (히트맵 PNG — 영상에서 재생성 가능)
 bos_diag_*/
 bos86_*/
+bos87_*/
 bos120_*/
+bos121_*/
+bos_check_normal/
+
+# SSH 및 데이터 전송 관련
+.ssh_key
+.ssh_key.pub
+.ssh_known_hosts
+setup_ssh.sh
+transfer.sh
+wait_transfer.sh
+transfer.log
+rsync.log
+bos_data.tar
