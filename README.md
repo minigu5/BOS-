@@ -365,10 +365,10 @@ python 4_nonrealtime.py              # 인자 없으면 파일 선택창
 
 | 상수 | 기본값 | 증상 → 조정 |
 |------|--------|-------------|
-| `DEADZONE_LO` | 0.6 | **가만히 있어도 경보** → ↑ (0.8, 1.0 …) |
-| `MIN_DENOM` | 1.5 | **가만히 있어도 경보** → ↑ (노이즈 뻥튀기 차단 강화) |
+| `DEADZONE_LO` | 0.10 | **가만히 있어도 경보** → ↑ (0.15, 0.20 …) |
+| `MIN_DENOM` | 0.20 | **가만히 있어도 경보** → ↑ (노이즈 뻥튀기 차단 강화) |
 | `CEILING_HI` | 6.0 | **사람만 움직여도 경보** → ↓ (4.0 …) |
-| `BLOB_AREA_FRAC` | 0.04 | **사람만 움직여도 경보** → ↓ (0.02 …) |
+| `BLOB_AREA_FRAC` | 0.10 | **사람만 움직여도 경보** → ↓ (0.05 …) |
 
 > 값 변경 후 반드시:
 > ```bash
@@ -426,7 +426,6 @@ Step 3의 `THRESHOLD` 에 반영합니다. 실시간에는 추가로
 |------|--------|-------------|
 | `--chunk_size` | 16 | 더 긴 시간 문맥 필요 시 32 |
 | `--overlap` | 8 | 데이터 부족 시 ↑ (청크 수 증가) |
-| `--ema_alpha` | 0.05 | 카메라가 흔들리면 0.02로 |
 | `--deadzone_lo / --ceiling_hi / --blob_frac` | bos_common 동일 | 9장 참고 |
 
 ### 학습 (`2_train.py`)
@@ -522,6 +521,10 @@ python 2_train.py --num_epochs 30 --batch_size 4 --img_size 64
    → 3_realtime_detect1.py 의 THRESHOLD 에 반영
          ↓
 ⑤ python 3_realtime_detect1.py  (웹캠 실시간 탐지, 종료 'q')
+
+※ bos_common.py 의 신호 파라미터를 바꾸면 ②③ 을 다시 수행해야 합니다.
+```
+�� 탐지, 종료 'q')
 
 ※ bos_common.py 의 신호 파라미터를 바꾸면 ②③ 을 다시 수행해야 합니다.
 ```
