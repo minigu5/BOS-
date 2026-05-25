@@ -294,7 +294,7 @@ def main():
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, RES_PRESETS[ridx][1])
             cur_res = ridx
             roi = None
-            prev_gray = None
+            gray_buffer.clear()
             flow_buffer.clear(); alarm_hist.clear()
             print(f"[INFO] 해상도 → {int(cap.get(3))}x{int(cap.get(4))} (ROI 초기화, 'r'로 재설정 가능)")
 
@@ -304,9 +304,11 @@ def main():
 
         region = crop(frame, roi)
         curr_gray = bc.to_gray_resized(region)
-        if prev_gray is None:                       # 배경 재초기화 (해상도/ROI 변경 직후)
-            prev_gray = curr_gray.copy()
+        gray_buffer.append(curr_gray)
+        if len(gray_buffer) < bc.FRAME_STRIDE:
             continue
+            
+        prev_gray = gray_buffer[0]
 
         # BOS 신호 억제 파라미터 (실험용 슬라이더; 기본값은 학습과 동일)
         min_move = cv2.getTrackbarPos("MinMove x1000", WINDOW) / 1000.0
@@ -314,7 +316,7 @@ def main():
         keep_gas = cv2.getTrackbarPos("KeepGas", WINDOW) == 1
 
         # ── 학습과 동일한 신호 경로 (슬라이더로 억제 파라미터만 덮어씀) ──
-        flow_norm, prev_gray = bc.process_pair(prev_gray, curr_gray,
+        flow_norm, _ = bc.process_pair(prev_gray, curr_gray,
                                             lo=min_move, hi=ceil, coherent_only=keep_gas)
         flow_in = cv2.resize(flow_norm, (IMG_SIZE, IMG_SIZE))
         flow_buffer.append(flow_in)
@@ -353,17 +355,12 @@ def main():
             ok2, f2 = cap.read()
             if ok2:
                 roi = select_roi(f2)
-                prev_gray = None
+                gray_buffer.clear()
                 flow_buffer.clear(); alarm_hist.clear()
                 print(f"[INFO] ROI 재설정: {roi if roi else '전체 화면'}")
 
     cap.release()
     cv2.destroyAllWindows()
-
-
-if __name__ == "__main__":
-    main()
-ws()
 
 
 if __name__ == "__main__":
