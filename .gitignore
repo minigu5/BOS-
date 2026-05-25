@@ -34,3 +34,8 @@ build/
 
 # 옛 카메라 영상 백업 (4.6GB)
 input_backup_1/
+
+# BOS 신호 진단 출력 폴더 (히트맵 PNG — 영상에서 재생성 가능)
+bos_diag_*/
+bos86_*/
+bos120_*/
