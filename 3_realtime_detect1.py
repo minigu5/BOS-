@@ -55,8 +55,8 @@ CHUNK_SIZE = 16            # AI 판단에 필요한 프레임 수
 CAMERA_INDEX = 0           # 노트북 내장 웹캠 (안 켜지면 1로 변경)
 
 # 경보 임계값 (실행 중 화면 슬라이더로도 조절 가능).
-# 2026-05-24 학습(241영상) 스윕 기준: 0.50 에서 Precision 0.97 / Recall 0.84 / F1 0.90.
-THRESHOLD = 0.50
+# 2026-05-24 학습(241영상) 스윕 기준: 0.89 에서 Precision 0.99+ / Recall 0.81.
+THRESHOLD = 0.89
 ALARM_WINDOW = 6           # 시간적 히스테리시스 관찰 창
 ALARM_MIN_HITS = 4         # 창 안에서 이만큼 임계 초과해야 경보
 
